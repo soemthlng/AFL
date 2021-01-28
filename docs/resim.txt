@@ -1,0 +1,13 @@
+todo:
+look for memory leaks on resim as iterations go up.
+fiddle with backstop values
+pass timeout from afl to resim on hello message
+The resim fuzz/trim operation is first used to create a
+trimmed input file that is not padded.  We then pad what afl
+gives us to the minimum bytes needed by the service.
+This requires configuration changes by service.
+
+This is binary fuzzing without initial seeds.  
+Human assisted/driven fuzzing.  Use resim to generate seed cases;
+fuzz; take best new paths and human assist those.
+Automate using trackio?

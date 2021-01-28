@@ -67,6 +67,10 @@
 #include <sys/ioctl.h>
 #include <sys/file.h>
 
+#include <sys/socket.h> 
+#include <arpa/inet.h> 
+#include <netinet/in.h> 
+
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
 #endif /* __APPLE__ || __FreeBSD__ || __OpenBSD__ */
@@ -132,12 +136,16 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            shuffle_queue,             /* Shuffle input queue?             */
            bitmap_changed = 1,        /* Time to update bitmap?           */
            qemu_mode,                 /* Running in QEMU mode?            */
+           resim_mode,                 /* Running in RESim mode?          */
+           connfd,                    /* Network connecction ofrresim_mode*/
+           serverfd,                  /* Network connecction ofrresim_mode*/
            skip_requested,            /* Skip request, via SIGUSR1        */
            run_over10m,               /* Run time over 10 minutes?        */
            persistent_mode,           /* Running in persistent mode?      */
            deferred_mode,             /* Deferred forkserver mode?        */
            fast_cal;                  /* Try to calibrate faster?         */
 
+static s32 iterations=0;              /* number of resim iterations       */
 static s32 out_fd,                    /* Persistent fd for out_file       */
            dev_urandom_fd = -1,       /* Persistent fd for /dev/urandom   */
            dev_null_fd = -1,          /* Persistent fd for /dev/null      */
@@ -336,7 +344,83 @@ enum {
   /* 05 */ FAULT_NOBITS
 };
 
+/* RESim network functinos */  
+#define SA struct sockaddr 
+#define RESIM_MSG_SIZE 80 
+void sendMsg(char *msg){
+    int n = write(connfd, msg, RESIM_MSG_SIZE); 
+    if(n != RESIM_MSG_SIZE){
+        printf("ERROR sending messsage %d\n", n);
+    }
+}
 
+void getMsg(char *msg){
+    int n = 0;
+    int remain = RESIM_MSG_SIZE;
+    while(remain > 0){
+        n = read(connfd, msg, remain);
+        remain = RESIM_MSG_SIZE - n; 
+        if(n<=0){
+            printf("ERROR reading messsage %d\n", n);
+            close(connfd);
+            close(serverfd);
+            exit(1);
+        }
+    }
+}
+  
+void socketSetup() 
+{ 
+    int len; 
+    int PORT = 8765;
+    struct sockaddr_in servaddr, cli; 
+  
+    // socket create and verification 
+    serverfd = socket(AF_INET, SOCK_STREAM, 0); 
+    if (serverfd == -1) { 
+        printf("socket creation failed...\n"); 
+        exit(0); 
+    } 
+    else
+        printf("Socket successfully created..\n"); 
+    bzero(&servaddr, sizeof(servaddr)); 
+  
+    // assign IP, PORT 
+    servaddr.sin_family = AF_INET; 
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY); 
+    servaddr.sin_port = htons(PORT); 
+  
+    // Binding newly created socket to given IP and verification 
+    if ((bind(serverfd, (SA*)&servaddr, sizeof(servaddr))) != 0) { 
+        printf("socket bind failed...\n"); 
+        exit(0); 
+    } 
+    else
+        printf("Socket successfully binded..\n"); 
+  
+    // Now server is ready to listen and verification 
+    if ((listen(serverfd, 5)) != 0) { 
+        printf("Listen failed...\n"); 
+        exit(0); 
+    } 
+    else
+        printf("Server listening..\n"); 
+    len = sizeof(cli); 
+  
+    // Accept the data packet from client and verification 
+    connfd = accept(serverfd, (SA*)&cli, &len); 
+    if (connfd < 0) { 
+        printf("server acccept failed...\n"); 
+        exit(0); 
+    } 
+    else
+        printf("server acccept the client...\n"); 
+    char buffer[RESIM_MSG_SIZE];
+    getMsg(buffer);
+    sprintf(buffer, "hello from AFL\n");
+    sendMsg(buffer);
+  
+} 
 /* Get unix time in milliseconds */
 
 static u64 get_cur_time(void) {
@@ -2283,6 +2367,32 @@ EXP_ST void init_forkserver(char** argv) {
 
 }
 
+static u8 run_resim(){
+  char *shared = "/mnt/hgfs/SEED/afl";
+  char *trace_results = alloc_printf("%s/bitfile", shared);
+  time_t now;
+  char buffer[RESIM_MSG_SIZE];
+  memset(buffer, 0, RESIM_MSG_SIZE);
+  s32 tfile;
+  time(&now);
+  sprintf(buffer, "afl_ready iteration %d\n", iterations);
+  iterations++;
+  sendMsg(buffer);
+  //printf("%s -- sent ready iteration  %d\n", ctime(&now), iterations);
+  getMsg(buffer);
+  time(&now);
+  //printf("%s -- got from resim: %s\n", ctime(&now), buffer);
+  tfile = open(trace_results, O_RDONLY);
+  if(tfile<0){
+      printf("Error opening %s\n", trace_results);
+      return 1;
+  } 
+  int len = read(tfile, trace_bits, MAP_SIZE); 
+  //printf("read %d bytes from trace bits\n", len);
+  close(tfile);
+  ck_free(trace_results);
+  return 0;
+}
 
 /* Execute target application, monitoring for timeouts. Return status
    information. The called program will update trace_bits[]. */
@@ -2303,6 +2413,11 @@ static u8 run_target(char** argv, u32 timeout) {
      territory. */
 
   memset(trace_bits, 0, MAP_SIZE);
+
+  if(resim_mode == 1){
+      //printf("in run_target outfile is %s\n", out_file);
+      return run_resim();
+  }
   MEM_BARRIER();
 
   /* If we're running in "dumb" mode, we can't rely on the fork server
@@ -2598,7 +2713,7 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
   /* Make sure the forkserver is up before we do anything, and let's not
      count its spin-up time toward binary calibration. */
 
-  if (dumb_mode != 1 && !no_forkserver && !forksrv_pid)
+  if (dumb_mode != 1 && !no_forkserver && !forksrv_pid && resim_mode != 1)
     init_forkserver(argv);
 
   if (q->exec_cksum) {
@@ -6833,7 +6948,9 @@ static void sync_fuzzers(char** argv) {
 static void handle_stop_sig(int sig) {
 
   stop_soon = 1; 
-
+  close(connfd);
+  close(serverfd);
+  printf("handl stop sig\n");
   if (child_pid > 0) kill(child_pid, SIGKILL);
   if (forksrv_pid > 0) kill(forksrv_pid, SIGKILL);
 
@@ -7323,6 +7440,10 @@ static void check_crash_handling(void) {
   /* This is Linux specific, but I don't think there's anything equivalent on
      *BSD, so we can just let it slide for now. */
 
+  if(resim_mode){ 
+      socketSetup();
+      return;
+  }
   s32 fd = open("/proc/sys/kernel/core_pattern", O_RDONLY);
   u8  fchar;
 
@@ -7795,7 +7916,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:dnCB:S:M:x:QV")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:dnCB:S:M:x:QVR")) > 0)
 
     switch (opt) {
 
@@ -7974,6 +8095,9 @@ int main(int argc, char** argv) {
         if (!mem_limit_given) mem_limit = MEM_LIMIT_QEMU;
 
         break;
+      case 'R': /* RESim mode */
+        resim_mode = 1;
+        break;
 
       case 'V': /* Show version number */
 
@@ -8058,7 +8182,7 @@ int main(int argc, char** argv) {
 
   if (!out_file) setup_stdio_file();
 
-  check_binary(argv[optind]);
+  if (!resim_mode) check_binary(argv[optind]);
 
   start_time = get_cur_time();
 
@@ -8193,5 +8317,6 @@ stop_fuzzing:
   exit(0);
 
 }
+  
 
 #endif /* !AFL_LIB */
