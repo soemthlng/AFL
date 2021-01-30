@@ -361,10 +361,10 @@ void getMsg(char *msg){
         n = read(connfd, msg, remain);
         remain = RESIM_MSG_SIZE - n; 
         if(n<=0){
-            printf("ERROR reading messsage %d\n", n);
+            printf("RESim exited.%d\n", n);
             close(connfd);
             close(serverfd);
-            exit(1);
+            exit(0);
         }
     }
 }
@@ -375,46 +375,35 @@ void socketSetup()
     int PORT = 8765;
     struct sockaddr_in servaddr, cli; 
   
-    // socket create and verification 
     serverfd = socket(AF_INET, SOCK_STREAM, 0); 
     if (serverfd == -1) { 
-        printf("socket creation failed...\n"); 
+        printf("socket creation failed\n"); 
         exit(0); 
     } 
-    else
-        printf("Socket successfully created..\n"); 
     bzero(&servaddr, sizeof(servaddr)); 
   
-    // assign IP, PORT 
     servaddr.sin_family = AF_INET; 
     servaddr.sin_addr.s_addr = htonl(INADDR_ANY); 
     servaddr.sin_port = htons(PORT); 
   
-    // Binding newly created socket to given IP and verification 
     if ((bind(serverfd, (SA*)&servaddr, sizeof(servaddr))) != 0) { 
-        printf("socket bind failed...\n"); 
+        printf("socket bind failed.\n"); 
         exit(0); 
     } 
-    else
-        printf("Socket successfully binded..\n"); 
   
-    // Now server is ready to listen and verification 
     if ((listen(serverfd, 5)) != 0) { 
         printf("Listen failed...\n"); 
         exit(0); 
     } 
-    else
-        printf("Server listening..\n"); 
     len = sizeof(cli); 
   
-    // Accept the data packet from client and verification 
     connfd = accept(serverfd, (SA*)&cli, &len); 
     if (connfd < 0) { 
         printf("server acccept failed...\n"); 
         exit(0); 
     } 
     else
-        printf("server acccept the client...\n"); 
+        printf("server acccept from resim\n"); 
     char buffer[RESIM_MSG_SIZE];
     getMsg(buffer);
     sprintf(buffer, "hello from AFL\n");
@@ -2367,31 +2356,33 @@ EXP_ST void init_forkserver(char** argv) {
 
 }
 
-static u8 run_resim(){
+static u8 run_resim(u32 timeout){
   char *shared = "/mnt/hgfs/SEED/afl";
   char *trace_results = alloc_printf("%s/bitfile", shared);
-  time_t now;
   char buffer[RESIM_MSG_SIZE];
   memset(buffer, 0, RESIM_MSG_SIZE);
   s32 tfile;
-  time(&now);
-  sprintf(buffer, "afl_ready iteration %d\n", iterations);
+  sprintf(buffer, "afl_ready timeout: %d iteration %d\n", timeout, iterations);
   iterations++;
   sendMsg(buffer);
-  //printf("%s -- sent ready iteration  %d\n", ctime(&now), iterations);
   getMsg(buffer);
-  time(&now);
-  //printf("%s -- got from resim: %s\n", ctime(&now), buffer);
+  u8 resim_status;
+  sscanf(buffer, "%*s %*s %*d %*s %d", &resim_status);
   tfile = open(trace_results, O_RDONLY);
   if(tfile<0){
       printf("Error opening %s\n", trace_results);
       return 1;
   } 
-  int len = read(tfile, trace_bits, MAP_SIZE); 
+  read(tfile, trace_bits, MAP_SIZE); 
   //printf("read %d bytes from trace bits\n", len);
   close(tfile);
   ck_free(trace_results);
-  return 0;
+  if(resim_status != 0){
+      //printf("Crashed? resim_status %d, buffer was %s\n", resim_status, buffer);
+      return FAULT_CRASH;
+  }else{ 
+     return 0;
+  }
 }
 
 /* Execute target application, monitoring for timeouts. Return status
@@ -2416,7 +2407,8 @@ static u8 run_target(char** argv, u32 timeout) {
 
   if(resim_mode == 1){
       //printf("in run_target outfile is %s\n", out_file);
-      return run_resim();
+      total_execs++;
+      return run_resim(timeout);
   }
   MEM_BARRIER();
 
@@ -7441,6 +7433,7 @@ static void check_crash_handling(void) {
      *BSD, so we can just let it slide for now. */
 
   if(resim_mode){ 
+      printf("timeout given %d\n", timeout_given);
       socketSetup();
       return;
   }

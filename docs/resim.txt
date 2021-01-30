@@ -1,7 +1,9 @@
-todo:
-look for memory leaks on resim as iterations go up.
-fiddle with backstop values
-pass timeout from afl to resim on hello message
+RESim integration with AFL
+
+Pass timeout from afl to resim on hello message
+** NO, does not give RESim enough time to catch the crash, i.e.,
+time it takes os to kill the process.  
+
 The resim fuzz/trim operation is first used to create a
 trimmed input file that is not padded.  We then pad what afl
 gives us to the minimum bytes needed by the service.
@@ -11,3 +13,8 @@ This is binary fuzzing without initial seeds.
 Human assisted/driven fuzzing.  Use resim to generate seed cases;
 fuzz; take best new paths and human assist those.
 Automate using trackio?
+
+Performance
+Disabled all debug, increased speed x10.
+Catching SEGV by watching all task records
+of process group for signs of death.
