@@ -4,6 +4,9 @@
 
 Originally developed by Michal Zalewski <lcamtuf@google.com>.
 
+Adapted for use with [RESim](https://github.com/mfthomps/RESim), 
+a Simics-based reverse engineering platform.
+
 See [QuickStartGuide.txt](docs/QuickStartGuide.txt) if you don't have time to read
 this file.
 

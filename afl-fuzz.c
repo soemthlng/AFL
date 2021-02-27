@@ -145,7 +145,8 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            deferred_mode,             /* Deferred forkserver mode?        */
            fast_cal;                  /* Try to calibrate faster?         */
 
-static s32 iterations=0;              /* number of resim iterations       */
+static u32 iterations=0;              /* number of resim iterations       */
+static u32 resim_max_size=0;       /* max size of resim messages       */
 static s32 out_fd,                    /* Persistent fd for out_file       */
            dev_urandom_fd = -1,       /* Persistent fd for /dev/urandom   */
            dev_null_fd = -1,          /* Persistent fd for /dev/null      */
@@ -245,6 +246,11 @@ static s32 cpu_aff = -1;       	      /* Selected CPU core                */
 #endif /* HAVE_AFFINITY */
 
 static FILE* plot_file;               /* Gnuplot output file              */
+
+static FILE* resim_dbg;               /* resim debug */
+
+#define RESIM_MSG_SIZE 4096
+static u8  resim_buf[RESIM_MSG_SIZE];       /* RESim hack.  Fix me */
 
 struct queue_entry {
 
@@ -346,20 +352,28 @@ enum {
 
 /* RESim network functinos */  
 #define SA struct sockaddr 
-#define RESIM_MSG_SIZE 80 
+
 void sendMsg(char *msg){
-    int n = write(connfd, msg, RESIM_MSG_SIZE); 
-    if(n != RESIM_MSG_SIZE){
+    char *msg_part = msg+4;
+    int mlen = strlen(msg_part);
+    memcpy(msg, &mlen, 4);
+    //int n = write(connfd, &mlen, 4); 
+    int full_len = mlen+4;
+    int n = write(connfd, msg, full_len);
+    if(n != full_len){
         printf("ERROR sending messsage %d\n", n);
+        close(connfd);
     }
 }
-
-void getMsg(char *msg){
+void getMsgOfSize(char *msg, int msg_size){
     int n = 0;
-    int remain = RESIM_MSG_SIZE;
+    //printf("got message of %d bytes from RESim\n", msg_size);
+    int remain = msg_size;
     while(remain > 0){
-        n = read(connfd, msg, remain);
-        remain = RESIM_MSG_SIZE - n; 
+        int offset = msg_size - remain;
+        n = read(connfd, &msg[offset], remain);
+        remain = remain - n; 
+        //printf("from resim, ramin %d, msg: %s\n", remain, msg);
         if(n<=0){
             printf("RESim exited.%d\n", n);
             close(connfd);
@@ -368,6 +382,33 @@ void getMsg(char *msg){
         }
     }
 }
+void getMsg(char *msg){
+    int n = 0;
+    int msg_size=0;
+    n = read(connfd, &msg_size, 4);
+    if(n<=0){
+        printf("RESim exited.%d\n", n);
+        close(connfd);
+        close(serverfd);
+        exit(0);
+    }
+    //printf("got message of %d bytes from RESim\n", msg_size);
+    int remain = msg_size;
+    while(remain > 0){
+        int offset = msg_size - remain;
+        n = read(connfd, &msg[offset], remain);
+        remain = remain - n; 
+        //printf("from resim, ramin %d, msg: %s\n", remain, msg);
+        if(n<=0){
+            printf("RESim exited.%d\n", n);
+            close(connfd);
+            close(serverfd);
+            exit(0);
+        }
+    }
+    msg[msg_size] = 0;
+}
+
   
 void socketSetup() 
 { 
@@ -401,13 +442,14 @@ void socketSetup()
     if (connfd < 0) { 
         printf("server acccept failed...\n"); 
         exit(0); 
-    } 
-    else
+    }else{
         printf("server acccept from resim\n"); 
-    char buffer[RESIM_MSG_SIZE];
-    getMsg(buffer);
-    sprintf(buffer, "hello from AFL\n");
-    sendMsg(buffer);
+    }
+    getMsg(resim_buf);
+    fprintf(resim_dbg, "Got hi message %s\n", resim_buf);
+    sscanf(resim_buf, "%*s %*s %*s %d", &num_blocks);
+    sprintf(&resim_buf[4], "hello from AFL\n");
+    sendMsg(resim_buf);
   
 } 
 /* Get unix time in milliseconds */
@@ -2358,16 +2400,18 @@ EXP_ST void init_forkserver(char** argv) {
 
 static u8 run_resim(u32 timeout){
   char *shared = "/mnt/hgfs/SEED/afl";
-  char *trace_results = alloc_printf("%s/bitfile", shared);
-  char buffer[RESIM_MSG_SIZE];
-  memset(buffer, 0, RESIM_MSG_SIZE);
+  //char *trace_results = alloc_printf("%s/bitfile", shared);
+  //memset(resim_buf, 0, RESIM_MSG_SIZE);
   s32 tfile;
-  sprintf(buffer, "afl_ready timeout: %d iteration %d\n", timeout, iterations);
   iterations++;
+  /*
+  sprintf(&buffer[4], "afl_ready timeout: %d iteration %d\n", timeout, iterations);
   sendMsg(buffer);
-  getMsg(buffer);
+  */
+  getMsg(resim_buf);
   u8 resim_status;
-  sscanf(buffer, "%*s %*s %*d %*s %d", &resim_status);
+  sscanf(resim_buf, "%*s %*s %*d %*s %d", &resim_status);
+  /*
   tfile = open(trace_results, O_RDONLY);
   if(tfile<0){
       printf("Error opening %s\n", trace_results);
@@ -2376,7 +2420,19 @@ static u8 run_resim(u32 timeout){
   read(tfile, trace_bits, MAP_SIZE); 
   //printf("read %d bytes from trace bits\n", len);
   close(tfile);
+  */
+
+ 
+  getMsgOfSize(trace_bits, MAP_SIZE); 
+  /*
+  for(int i=0; i< MAP_SIZE; i++){
+      if(trace_bits[i] > 0){
+          fprintf(resim_dbg, "iteration %d first set byte is %d value %d\n", iterations, i, trace_bits[i]);
+          break;
+      }
+  }
   ck_free(trace_results);
+  */
   if(resim_status != 0){
       //printf("Crashed? resim_status %d, buffer was %s\n", resim_status, buffer);
       return FAULT_CRASH;
@@ -2607,12 +2663,36 @@ static u8 run_target(char** argv, u32 timeout) {
 
 }
 
+static void resim_write(void* mem, u32 len){
+      //printf("resim_write len to buf 0x%x\n", &resim_buf[0]);
+      if(resim_max_size > 0 && len > resim_max_size){
+          len = resim_max_size;
+      }
+      memcpy(&resim_buf[0], &len, 4);
+      //printf("resim_write buf 0x%x\n", &resim_buf[4]);
+      int tot_len = len + 4;
+      if(tot_len > RESIM_MSG_SIZE){
+          tot_len = RESIM_MSG_SIZE;
+          printf("ERROR resim_write, msg too large %d, truncate to %d", len, RESIM_MSG_SIZE);
+          len = tot_len - 4; 
+          memcpy(&resim_buf[0], &len, 4);
+      }
+      memcpy(&resim_buf[4], mem, len);
+      int n = write(connfd, resim_buf, tot_len); 
+      if(n != tot_len){
+          printf("ERROR sending messsage %d\n", n);
+      }
+}
 
 /* Write modified data to file for testing. If out_file is set, the old file
    is unlinked and a new one is created. Otherwise, out_fd is rewound and
    truncated. */
 
 static void write_to_testcase(void* mem, u32 len) {
+  if(resim_mode == 1){
+      resim_write(mem, len);
+      return;
+  }
 
   s32 fd = out_fd;
 
@@ -2644,6 +2724,11 @@ static void write_with_gap(void* mem, u32 len, u32 skip_at, u32 skip_len) {
 
   s32 fd = out_fd;
   u32 tail_len = len - skip_at - skip_len;
+  if(resim_mode == 1){
+      if (skip_at) resim_write(mem, skip_at);
+      if (tail_len) resim_write(mem + skip_at + skip_len, tail_len);
+      return;
+  }
 
   if (out_file) {
 
@@ -7433,6 +7518,8 @@ static void check_crash_handling(void) {
      *BSD, so we can just let it slide for now. */
 
   if(resim_mode){ 
+      resim_dbg = fopen("resim_dbg.log", "w");
+      fprintf(resim_dbg, "Begin debug\n");
       printf("timeout given %d\n", timeout_given);
       socketSetup();
       return;
@@ -7909,7 +7996,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:dnCB:S:M:x:QVR")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:s:dnCB:S:M:x:QVR")) > 0)
 
     switch (opt) {
 
@@ -8090,6 +8177,12 @@ int main(int argc, char** argv) {
         break;
       case 'R': /* RESim mode */
         resim_mode = 1;
+        break;
+
+      case 's': /* RESim max message size */
+        printf("wtf, over?\n");
+        if (sscanf(optarg, "%u", &resim_max_size) < 1 ||
+              optarg[0] == '-') FATAL("Bad syntax used for -s");
         break;
 
       case 'V': /* Show version number */
