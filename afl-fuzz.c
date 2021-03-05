@@ -22,6 +22,8 @@
 
    Forkserver design by Jann Horn <jannhorn@googlemail.com>
 
+   Adapted for use with RESim by Mike Thompson <mfthomps@nps.edu>
+
    This is the real deal: the program takes an instrumented binary and
    attempts a variety of basic fuzzing tricks, paying close attention to
    how they affect the execution path.
@@ -251,6 +253,8 @@ static FILE* resim_dbg;               /* resim debug */
 
 #define RESIM_MSG_SIZE 4096
 static u8  resim_buf[RESIM_MSG_SIZE];       /* RESim hack.  Fix me */
+static u8  resim_gap_data[RESIM_MSG_SIZE];       /* RESim hack.  Fix me */
+static s32 prev_resim_len = 0;
 
 struct queue_entry {
 
@@ -447,7 +451,7 @@ void socketSetup()
     }
     getMsg(resim_buf);
     fprintf(resim_dbg, "Got hi message %s\n", resim_buf);
-    sscanf(resim_buf, "%*s %*s %*s %d", &num_blocks);
+    //sscanf(resim_buf, "%*s %*s %*s %d", &num_blocks);
     sprintf(&resim_buf[4], "hello from AFL\n");
     sendMsg(resim_buf);
   
@@ -1576,6 +1580,7 @@ static void read_testcases(void) {
            "    or so. The cases must be stored as regular files directly in the input\n"
            "    directory.\n");
 
+    close(connfd);
     PFATAL("Unable to open '%s'", in_dir);
 
   }
@@ -2399,29 +2404,17 @@ EXP_ST void init_forkserver(char** argv) {
 }
 
 static u8 run_resim(u32 timeout){
-  char *shared = "/mnt/hgfs/SEED/afl";
-  //char *trace_results = alloc_printf("%s/bitfile", shared);
-  //memset(resim_buf, 0, RESIM_MSG_SIZE);
-  s32 tfile;
-  iterations++;
-  /*
-  sprintf(&buffer[4], "afl_ready timeout: %d iteration %d\n", timeout, iterations);
-  sendMsg(buffer);
-  */
   getMsg(resim_buf);
   u8 resim_status;
-  sscanf(resim_buf, "%*s %*s %*d %*s %d", &resim_status);
-  /*
-  tfile = open(trace_results, O_RDONLY);
-  if(tfile<0){
-      printf("Error opening %s\n", trace_results);
-      return 1;
-  } 
-  read(tfile, trace_bits, MAP_SIZE); 
-  //printf("read %d bytes from trace bits\n", len);
-  close(tfile);
-  */
-
+  s32 got_len;
+  u32 this_iter;
+  sscanf(resim_buf, "%*s %*s %d %*s %d %*s %d", &this_iter, &resim_status, &got_len);
+  //fprintf(resim_dbg, "run_resim got %s\n", resim_buf);
+  if(got_len != prev_resim_len || iterations != this_iter){
+      printf("ERROR len mismatch got %d expected %d iteration %d got %d\n", got_len, prev_resim_len, iterations, this_iter);
+      close(connfd);
+      exit(1);
+  }
  
   getMsgOfSize(trace_bits, MAP_SIZE); 
   /*
@@ -2435,6 +2428,7 @@ static u8 run_resim(u32 timeout){
   */
   if(resim_status != 0){
       //printf("Crashed? resim_status %d, buffer was %s\n", resim_status, buffer);
+      fprintf(resim_dbg, "Got crash status on iteration %d\n", iterations);
       return FAULT_CRASH;
   }else{ 
      return 0;
@@ -2461,13 +2455,14 @@ static u8 run_target(char** argv, u32 timeout) {
 
   memset(trace_bits, 0, MAP_SIZE);
 
+  MEM_BARRIER();
+
   if(resim_mode == 1){
+      /* We assume the data has been sent to RESim.  Wait for reply */
       //printf("in run_target outfile is %s\n", out_file);
       total_execs++;
       return run_resim(timeout);
   }
-  MEM_BARRIER();
-
   /* If we're running in "dumb" mode, we can't rely on the fork server
      logic compiled into the target program, so we will just keep calling
      execve(). There is a bit of code duplication between here and 
@@ -2664,6 +2659,7 @@ static u8 run_target(char** argv, u32 timeout) {
 }
 
 static void resim_write(void* mem, u32 len){
+      iterations++;
       //printf("resim_write len to buf 0x%x\n", &resim_buf[0]);
       if(resim_max_size > 0 && len > resim_max_size){
           len = resim_max_size;
@@ -2681,7 +2677,10 @@ static void resim_write(void* mem, u32 len){
       int n = write(connfd, resim_buf, tot_len); 
       if(n != tot_len){
           printf("ERROR sending messsage %d\n", n);
+          fprintf(resim_dbg, "ERROR sending messsage %d\n", n);
       }
+      //fprintf(resim_dbg, "afl send %d bytes, total %d iteration %d\n", len, tot_len, iterations);
+      prev_resim_len = len;
 }
 
 /* Write modified data to file for testing. If out_file is set, the old file
@@ -2725,8 +2724,10 @@ static void write_with_gap(void* mem, u32 len, u32 skip_at, u32 skip_len) {
   s32 fd = out_fd;
   u32 tail_len = len - skip_at - skip_len;
   if(resim_mode == 1){
-      if (skip_at) resim_write(mem, skip_at);
-      if (tail_len) resim_write(mem + skip_at + skip_len, tail_len);
+      if (skip_at) memcpy(&resim_gap_data[0], mem, skip_at);
+      if (tail_len) memcpy(&resim_gap_data[0]+skip_at, mem + skip_at + skip_len, tail_len);
+      resim_write(resim_gap_data, skip_at+tail_len);
+      //fprintf(resim_dbg, "write_with_gap");
       return;
   }
 
@@ -3094,7 +3095,8 @@ static void perform_dry_run(char** argv) {
         FATAL("Unable to execute target application ('%s')", argv[0]);
 
       case FAULT_NOINST:
-
+        close(connfd);
+    
         FATAL("No instrumentation detected");
 
       case FAULT_NOBITS: 
@@ -3927,6 +3929,7 @@ static void maybe_delete_out_dir(void) {
            "    session, put '-' as the input directory in the command line ('-i -') and\n"
            "    try again.\n", OUTPUT_GRACE);
 
+       close(connfd);
        FATAL("At-risk data found in '%s'", out_dir);
 
     }
@@ -4111,6 +4114,7 @@ dir_cleanup_failed:
        "    Please examine and manually delete the files, or specify a different\n"
        "    output location for the tool.\n", fn);
 
+  close(connfd);
   FATAL("Output directory cleanup failed");
 
 }
@@ -7180,6 +7184,7 @@ EXP_ST void check_binary(u8* fname) {
          "    For that, you can use the -n option - but expect much worse results.)\n",
          doc_path);
 
+    close(connfd);
     FATAL("No instrumentation detected");
 
   }
@@ -8180,7 +8185,6 @@ int main(int argc, char** argv) {
         break;
 
       case 's': /* RESim max message size */
-        printf("wtf, over?\n");
         if (sscanf(optarg, "%u", &resim_max_size) < 1 ||
               optarg[0] == '-') FATAL("Bad syntax used for -s");
         break;
