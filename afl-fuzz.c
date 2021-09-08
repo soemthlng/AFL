@@ -149,6 +149,7 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
 
 static u32 iterations=0;              /* number of resim iterations       */
 static u32 resim_max_size=0;       /* max size of resim messages       */
+static u32 resim_port=8765;       /* port number for comms with RESim*/
 static s32 out_fd,                    /* Persistent fd for out_file       */
            dev_urandom_fd = -1,       /* Persistent fd for /dev/urandom   */
            dev_null_fd = -1,          /* Persistent fd for /dev/null      */
@@ -421,7 +422,7 @@ void getMsg(char *msg){
 void socketSetup() 
 { 
     int len; 
-    int PORT = 8765;
+    int PORT = resim_port;
     struct sockaddr_in servaddr, cli; 
   
     serverfd = socket(AF_INET, SOCK_STREAM, 0); 
@@ -8035,7 +8036,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:s:dnCB:S:M:x:QVR")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:s:p:dnCB:S:M:x:QVR")) > 0)
 
     switch (opt) {
 
@@ -8216,6 +8217,11 @@ int main(int argc, char** argv) {
         break;
       case 'R': /* RESim mode */
         resim_mode = 1;
+        break;
+
+      case 'p': /* RESim port*/
+        if (sscanf(optarg, "%u", &resim_port) < 1 ||
+              optarg[0] == '-') FATAL("Bad syntax used for -p");
         break;
 
       case 's': /* RESim max message size */
