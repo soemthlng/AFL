@@ -357,6 +357,13 @@ enum {
 /* RESim network functinos */  
 #define SA struct sockaddr 
 
+static void close_resim(){
+    close(connfd);
+    close(serverfd);
+    close(resim_dbg);
+    saveLast();
+}
+
 void sendMsg(char *msg){
     char *msg_part = msg+4;
     int mlen = strlen(msg_part);
@@ -366,7 +373,7 @@ void sendMsg(char *msg){
     int n = write(connfd, msg, full_len);
     if(n != full_len){
         printf("ERROR sending messsage %d\n", n);
-        close(connfd);
+        close_resim();
     }
 }
 void getMsgOfSize(char *msg, int msg_size){
@@ -380,8 +387,7 @@ void getMsgOfSize(char *msg, int msg_size){
         //printf("from resim, ramin %d, msg: %s\n", remain, msg);
         if(n<=0){
             printf("RESim exited.%d\n", n);
-            close(connfd);
-            close(serverfd);
+            close_resim();
             exit(0);
         }
     }
@@ -392,8 +398,7 @@ void getMsg(char *msg){
     n = read(connfd, &msg_size, 4);
     if(n<=0){
         printf("RESim exited.%d\n", n);
-        close(connfd);
-        close(serverfd);
+        close_resim();
         exit(0);
     }
     //printf("got message of %d bytes from RESim\n", msg_size);
@@ -405,8 +410,7 @@ void getMsg(char *msg){
         //printf("from resim, ramin %d, msg: %s\n", remain, msg);
         if(n<=0){
             printf("RESim exited.%d\n", n);
-            close(connfd);
-            close(serverfd);
+            close_resim();
             exit(0);
         }
     }
@@ -1571,7 +1575,7 @@ static void read_testcases(void) {
   nl_cnt = scandir(in_dir, &nl, NULL, alphasort);
 
   if (nl_cnt < 0) {
-
+    close_resim();
     if (errno == ENOENT || errno == ENOTDIR)
 
       SAYF("\n" cLRD "[-] " cRST
@@ -1580,7 +1584,6 @@ static void read_testcases(void) {
            "    or so. The cases must be stored as regular files directly in the input\n"
            "    directory.\n");
 
-    close(connfd);
     PFATAL("Unable to open '%s'", in_dir);
 
   }
@@ -2412,7 +2415,7 @@ static u8 run_resim(u32 timeout){
   //fprintf(resim_dbg, "run_resim got %s\n", resim_buf);
   if(got_len != prev_resim_len || iterations != this_iter){
       printf("ERROR len mismatch got %d expected %d iteration %d got %d\n", got_len, prev_resim_len, iterations, this_iter);
-      close(connfd);
+      close_resim();
       exit(1);
   }
  
@@ -2813,7 +2816,9 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
     write_to_testcase(use_mem, q->len);
 
     fault = run_target(argv, use_tmout);
-
+    if(fault == FAULT_CRASH){
+      fprintf(resim_dbg, "crash in calibrate\n");
+    }
     /* stop_soon is set by the handler for Ctrl+C. When it's pressed,
        we want to bail out quickly. */
 
@@ -2948,6 +2953,9 @@ static void perform_dry_run(char** argv) {
     u8* fn = strrchr(q->fname, '/') + 1;
 
     ACTF("Attempting dry run with '%s'...", fn);
+    if(resim_mode){ 
+      fprintf(resim_dbg, "Dry iteration %d  %s\n", iterations, fn);
+    }
 
     fd = open(q->fname, O_RDONLY);
     if (fd < 0) PFATAL("Unable to open '%s'", q->fname);
@@ -3027,6 +3035,7 @@ static void perform_dry_run(char** argv) {
           cal_failures++;
           break;
         }
+        close_resim();
 
         if (mem_limit) {
 
@@ -3095,7 +3104,7 @@ static void perform_dry_run(char** argv) {
         FATAL("Unable to execute target application ('%s')", argv[0]);
 
       case FAULT_NOINST:
-        close(connfd);
+        close_resim();
     
         FATAL("No instrumentation detected");
 
@@ -3403,6 +3412,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     if (fd < 0) PFATAL("Unable to create '%s'", fn);
     ck_write(fd, mem, len, fn);
     close(fd);
+    fprintf(resim_dbg, "saved iteration %d as %s\n", iterations, fn);
 
     keeping = 1;
 
@@ -3444,6 +3454,9 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
         u8 new_fault;
         write_to_testcase(mem, len);
         new_fault = run_target(argv, hang_tmout);
+        if(fault == FAULT_CRASH){
+          fprintf(resim_dbg, "crash in rehang\n");
+        }
 
         /* A corner case that one user reported bumping into: increasing the
            timeout actually uncovers a crash. Make sure we don't discard it if
@@ -3527,6 +3540,7 @@ keep_as_crash:
   /* If we're here, we apparently want to save the crash or hang
      test case, too. */
 
+  fprintf(resim_dbg, "Crash on iteration %d saved to %s\n", iterations, fn);
   fd = open(fn, O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0) PFATAL("Unable to create '%s'", fn);
   ck_write(fd, mem, len, fn);
@@ -3929,7 +3943,7 @@ static void maybe_delete_out_dir(void) {
            "    session, put '-' as the input directory in the command line ('-i -') and\n"
            "    try again.\n", OUTPUT_GRACE);
 
-       close(connfd);
+       close_resim();
        FATAL("At-risk data found in '%s'", out_dir);
 
     }
@@ -4114,7 +4128,7 @@ dir_cleanup_failed:
        "    Please examine and manually delete the files, or specify a different\n"
        "    output location for the tool.\n", fn);
 
-  close(connfd);
+  close_resim();
   FATAL("Output directory cleanup failed");
 
 }
@@ -4764,6 +4778,9 @@ static u8 trim_case(char** argv, struct queue_entry* q, u8* in_buf) {
       write_with_gap(in_buf, q->len, remove_pos, trim_avail);
 
       fault = run_target(argv, exec_tmout);
+      if(fault == FAULT_CRASH){
+          fprintf(resim_dbg, "crash in trim\n");
+      }
       trim_execs++;
 
       if (stop_soon || fault == FAULT_ERROR) goto abort_trimming;
@@ -4857,6 +4874,9 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
   write_to_testcase(out_buf, len);
 
   fault = run_target(argv, exec_tmout);
+   if(fault == FAULT_CRASH){
+      fprintf(resim_dbg, "crash in common fuzz\n");
+  }
 
   if (stop_soon) return 1;
 
@@ -7022,6 +7042,21 @@ static void sync_fuzzers(char** argv) {
   closedir(sd);
 
 }
+void saveLast(){
+  static s32 last_data_fd;
+
+  u8* fn = alloc_printf("/tmp/last_afl.io");
+
+  unlink(fn); /* Ignore errors */
+
+  last_data_fd = open(fn, O_RDWR | O_CREAT | O_EXCL, 0600);
+
+  if (last_data_fd < 0) PFATAL("Unable to create '%s'", fn);
+  ck_write(last_data_fd, &resim_buf[4], prev_resim_len, fn);
+  close(last_data_fd);
+
+  ck_free(fn);
+}
 
 
 /* Handle stop signal (Ctrl-C, etc). */
@@ -7029,8 +7064,7 @@ static void sync_fuzzers(char** argv) {
 static void handle_stop_sig(int sig) {
 
   stop_soon = 1; 
-  close(connfd);
-  close(serverfd);
+  close_resim();
   printf("handl stop sig\n");
   if (child_pid > 0) kill(child_pid, SIGKILL);
   if (forksrv_pid > 0) kill(forksrv_pid, SIGKILL);
@@ -7184,7 +7218,7 @@ EXP_ST void check_binary(u8* fname) {
          "    For that, you can use the -n option - but expect much worse results.)\n",
          doc_path);
 
-    close(connfd);
+    close_resim();
     FATAL("No instrumentation detected");
 
   }
