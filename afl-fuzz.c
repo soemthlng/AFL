@@ -252,7 +252,7 @@ static FILE* plot_file;               /* Gnuplot output file              */
 
 static FILE* resim_dbg;               /* resim debug */
 
-#define RESIM_MSG_SIZE 4096
+#define RESIM_MSG_SIZE 12288
 static u8  resim_buf[RESIM_MSG_SIZE];       /* RESim hack.  Fix me */
 static u8  resim_gap_data[RESIM_MSG_SIZE];       /* RESim hack.  Fix me */
 static s32 prev_resim_len = 0;
@@ -361,6 +361,7 @@ enum {
 static void close_resim(){
     close(connfd);
     close(serverfd);
+    fprintf(resim_dbg, "Got signal saving last sessin.\n");
     close(resim_dbg);
     saveLast();
 }
@@ -374,6 +375,7 @@ void sendMsg(char *msg){
     int n = write(connfd, msg, full_len);
     if(n != full_len){
         printf("ERROR sending messsage %d\n", n);
+        fprintf(resim_dbg, "ERROR sending messsage %d\n", n);
         close_resim();
     }
 }
@@ -388,6 +390,7 @@ void getMsgOfSize(char *msg, int msg_size){
         //printf("from resim, ramin %d, msg: %s\n", remain, msg);
         if(n<=0){
             printf("RESim exited.%d\n", n);
+            fprintf(resim_dbg, "RESim exited in getMsgOfSize.\n");
             close_resim();
             exit(0);
         }
@@ -399,9 +402,17 @@ void getMsg(char *msg){
     n = read(connfd, &msg_size, 4);
     if(n<=0){
         printf("RESim exited.%d\n", n);
+        fprintf(resim_dbg, "RESim exited in getMsg.\n");
         close_resim();
         exit(0);
     }
+    if(msg_size > RESIM_MSG_SIZE){
+        printf("ERROR, got msg_size of %d\n", msg_size);
+        fprintf(resim_dbg, "ERROR, got msg_size of %d\n", msg_size);
+        close_resim();
+        exit(0);
+    }
+        
     //printf("got message of %d bytes from RESim\n", msg_size);
     int remain = msg_size;
     while(remain > 0){
@@ -411,6 +422,7 @@ void getMsg(char *msg){
         //printf("from resim, ramin %d, msg: %s\n", remain, msg);
         if(n<=0){
             printf("RESim exited.%d\n", n);
+            fprintf(resim_dbg, "RESim exited in getMsg trying for remainder.\n");
             close_resim();
             exit(0);
         }
@@ -2416,6 +2428,7 @@ static u8 run_resim(u32 timeout){
   //fprintf(resim_dbg, "run_resim got %s\n", resim_buf);
   if(got_len != prev_resim_len || iterations != this_iter){
       printf("ERROR len mismatch got %d expected %d iteration %d got %d\n", got_len, prev_resim_len, iterations, this_iter);
+      fprintf(resim_dbg, "ERROR len mismatch got %d expected %d iteration %d got %d\n", got_len, prev_resim_len, iterations, this_iter);
       close_resim();
       exit(1);
   }
@@ -2677,6 +2690,11 @@ static void resim_write(void* mem, u32 len){
           len = tot_len - 4; 
           memcpy(&resim_buf[0], &len, 4);
       }
+      if((len+4) > RESIM_MSG_SIZE){
+          printf("ERROR len is %d\n", len);    
+          fprintf(resim_dbg, "ERROR len is %d\n", len);    
+          close_resim();
+      }
       memcpy(&resim_buf[4], mem, len);
       int n = write(connfd, resim_buf, tot_len); 
       if(n != tot_len){
@@ -2728,7 +2746,21 @@ static void write_with_gap(void* mem, u32 len, u32 skip_at, u32 skip_len) {
   s32 fd = out_fd;
   u32 tail_len = len - skip_at - skip_len;
   if(resim_mode == 1){
+      if(skip_at > RESIM_MSG_SIZE){
+          printf("write_with_gap skip_at too big with %d\n", skip_at);
+          fprintf(resim_dbg, "write_with_gap skip_at too big with %d\n", skip_at);
+          skip_at = 0;
+          //close_resim();
+          //exit(1);
+      }
       if (skip_at) memcpy(&resim_gap_data[0], mem, skip_at);
+      if(tail_len > (RESIM_MSG_SIZE - skip_at)){
+          printf("write_with_gap tail_len too big with %d skip_at %d\n", tail_len, skip_at);
+          fprintf(resim_dbg, "write_with_gap tail_len too big with %d skip_at %d\n", tail_len, skip_at);
+          tail_len = RESIM_MSG_SIZE - skip_at;
+          //close_resim();
+          //exit(1);
+      }
       if (tail_len) memcpy(&resim_gap_data[0]+skip_at, mem + skip_at + skip_len, tail_len);
       resim_write(resim_gap_data, skip_at+tail_len);
       //fprintf(resim_dbg, "write_with_gap");
@@ -3036,6 +3068,7 @@ static void perform_dry_run(char** argv) {
           cal_failures++;
           break;
         }
+        fprintf(resim_dbg, "FAULT_CRASH during test case?\n");
         close_resim();
 
         if (mem_limit) {
@@ -3370,6 +3403,10 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   u8  hnb;
   s32 fd;
   u8  keeping = 0, res;
+  /* Reduce size to match what was sent to RESim */
+  if(resim_max_size > 0 && len > resim_max_size){
+      len = resim_max_size;
+  }
 
   if (fault == crash_mode) {
 
@@ -7046,7 +7083,7 @@ static void sync_fuzzers(char** argv) {
 void saveLast(){
   static s32 last_data_fd;
 
-  u8* fn = alloc_printf("/tmp/last_afl.io");
+  u8* fn = alloc_printf("./last_afl.io");
 
   unlink(fn); /* Ignore errors */
 
@@ -7065,6 +7102,7 @@ void saveLast(){
 static void handle_stop_sig(int sig) {
 
   stop_soon = 1; 
+  fprintf(resim_dbg, "Got stop signal %d\n", sig);
   close_resim();
   printf("handl stop sig\n");
   if (child_pid > 0) kill(child_pid, SIGKILL);
@@ -8420,6 +8458,8 @@ int main(int argc, char** argv) {
   save_auto();
 
 stop_fuzzing:
+  fprintf(resim_dbg, "stop_fuzzing: %s\n", cRST);
+  close_resim();
 
   SAYF(CURSOR_SHOW cLRD "\n\n+++ Testing aborted %s +++\n" cRST,
        stop_soon == 2 ? "programmatically" : "by user");
