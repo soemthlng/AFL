@@ -2435,18 +2435,21 @@ static u8 run_resim(u32 timeout){
  
   getMsgOfSize(trace_bits, MAP_SIZE); 
   /*
+  int hitcount = 0; 
   for(int i=0; i< MAP_SIZE; i++){
       if(trace_bits[i] > 0){
-          fprintf(resim_dbg, "iteration %d first set byte is %d value %d\n", iterations, i, trace_bits[i]);
-          break;
+          hitcount ++;
       }
   }
-  ck_free(trace_results);
+  fprintf(resim_dbg, "got %d hits\n", hitcount); 
   */
-  if(resim_status != 0){
+  if(resim_status == 1){
       //printf("Crashed? resim_status %d, buffer was %s\n", resim_status, buffer);
       fprintf(resim_dbg, "Got crash status on iteration %d\n", iterations);
       return FAULT_CRASH;
+  }else if(resim_status == 2){
+      fprintf(resim_dbg, "Got hang status on iteration %d\n", iterations);
+      return FAULT_TMOUT;
   }else{ 
      return 0;
   }
@@ -3467,6 +3470,7 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
 
       total_tmouts++;
 
+      fprintf(resim_dbg, "timeout, keeping is %d\n", keeping);
       if (unique_hangs >= KEEP_UNIQUE_HANG) return keeping;
 
       if (!dumb_mode) {
@@ -7592,16 +7596,13 @@ static void check_crash_handling(void) {
 
 #else
 
+  if(resim_mode){ 
+      return;
+  }
+
   /* This is Linux specific, but I don't think there's anything equivalent on
      *BSD, so we can just let it slide for now. */
 
-  if(resim_mode){ 
-      resim_dbg = fopen("resim_dbg.log", "w");
-      fprintf(resim_dbg, "Begin debug\n");
-      printf("timeout given %d\n", timeout_given);
-      socketSetup();
-      return;
-  }
   s32 fd = open("/proc/sys/kernel/core_pattern", O_RDONLY);
   u8  fchar;
 
@@ -8330,6 +8331,14 @@ int main(int argc, char** argv) {
 #endif /* HAVE_AFFINITY */
 
   check_crash_handling();
+  if(resim_mode){ 
+      char dumbbuf[80];
+      sprintf(dumbbuf, "./resim_dbg_%d.log", sync_id);
+      resim_dbg = fopen(dumbbuf, "w");
+      fprintf(resim_dbg, "Begin debug\n");
+      printf("timeout given %d\n", timeout_given);
+      socketSetup();
+  }
   check_cpu_governor();
 
   setup_post();
