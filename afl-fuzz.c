@@ -430,16 +430,35 @@ void getMsg(char *msg){
     msg[msg_size] = 0;
 }
 
+void doAccept()
+{
+    struct sockaddr_in cli; 
+    int len; 
+    len = sizeof(cli); 
   
+    connfd = accept(serverfd, (SA*)&cli, &len); 
+    if (connfd < 0) { 
+        printf("server acccept failed...\n"); 
+        fprintf(resim_dbg,"server acccept failed...\n"); 
+        exit(0); 
+    }else{
+        printf("server acccept from resim\n"); 
+    }
+    getMsg(resim_buf);
+    fprintf(resim_dbg, "Got hi message %s\n", resim_buf);
+    //sscanf(resim_buf, "%*s %*s %*s %d", &num_blocks);
+    sprintf(&resim_buf[4], "hello from AFL iteration is %d\n", iterations);
+    sendMsg(resim_buf);
+} 
 void socketSetup() 
 { 
-    int len; 
     int PORT = resim_port;
-    struct sockaddr_in servaddr, cli; 
+    struct sockaddr_in servaddr; 
   
     serverfd = socket(AF_INET, SOCK_STREAM, 0); 
     if (serverfd == -1) { 
         printf("socket creation failed\n"); 
+        fprintf(resim_dbg, "socket creation failed\n"); 
         exit(0); 
     } 
     bzero(&servaddr, sizeof(servaddr)); 
@@ -450,27 +469,18 @@ void socketSetup()
   
     if ((bind(serverfd, (SA*)&servaddr, sizeof(servaddr))) != 0) { 
         printf("socket bind failed.\n"); 
+        fprintf(resim_dbg, "socket %d bind failed.\n", PORT); 
         exit(0); 
-    } 
+    }else{ 
+        fprintf(resim_dbg, "socket %d bind ok.\n", PORT); 
+    }
   
     if ((listen(serverfd, 5)) != 0) { 
         printf("Listen failed...\n"); 
+        fprintf(resim_dbg,"Listen failed...\n"); 
         exit(0); 
     } 
-    len = sizeof(cli); 
-  
-    connfd = accept(serverfd, (SA*)&cli, &len); 
-    if (connfd < 0) { 
-        printf("server acccept failed...\n"); 
-        exit(0); 
-    }else{
-        printf("server acccept from resim\n"); 
-    }
-    getMsg(resim_buf);
-    fprintf(resim_dbg, "Got hi message %s\n", resim_buf);
-    //sscanf(resim_buf, "%*s %*s %*s %d", &num_blocks);
-    sprintf(&resim_buf[4], "hello from AFL\n");
-    sendMsg(resim_buf);
+    doAccept();
   
 } 
 /* Get unix time in milliseconds */
@@ -2421,10 +2431,10 @@ EXP_ST void init_forkserver(char** argv) {
 
 static u8 run_resim(u32 timeout){
   getMsg(resim_buf);
-  u8 resim_status;
+  u8 resim_status, do_restart;
   s32 got_len;
   u32 this_iter;
-  sscanf(resim_buf, "%*s %*s %d %*s %d %*s %d", &this_iter, &resim_status, &got_len);
+  sscanf(resim_buf, "%*s %*s %d %*s %d %*s %d %*s %d", &this_iter, &resim_status, &got_len, &do_restart);
   //fprintf(resim_dbg, "run_resim got %s\n", resim_buf);
   if(got_len != prev_resim_len || iterations != this_iter){
       printf("ERROR len mismatch got %d expected %d iteration %d got %d\n", got_len, prev_resim_len, iterations, this_iter);
@@ -2443,6 +2453,12 @@ static u8 run_resim(u32 timeout){
   }
   fprintf(resim_dbg, "got %d hits\n", hitcount); 
   */
+  if(do_restart != 0){
+      fprintf(resim_dbg, "Got restarting status on iteration %d, wait for accept\n", iterations);
+      close(connfd);
+      doAccept();
+  }
+
   if(resim_status == 1){
       //printf("Crashed? resim_status %d, buffer was %s\n", resim_status, buffer);
       fprintf(resim_dbg, "Got crash status on iteration %d\n", iterations);
@@ -8333,7 +8349,7 @@ int main(int argc, char** argv) {
   check_crash_handling();
   if(resim_mode){ 
       char dumbbuf[80];
-      sprintf(dumbbuf, "./resim_dbg_%d.log", sync_id);
+      sprintf(dumbbuf, "./resim_dbg_%d.log", resim_port);
       resim_dbg = fopen(dumbbuf, "w");
       fprintf(resim_dbg, "Begin debug\n");
       printf("timeout given %d\n", timeout_given);
