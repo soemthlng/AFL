@@ -361,7 +361,7 @@ enum {
 static void close_resim(){
     close(connfd);
     close(serverfd);
-    fprintf(resim_dbg, "Got signal saving last sessin.\n");
+    fprintf(resim_dbg, "Got signal saving last session.\n");
     close(resim_dbg);
     saveLast();
 }
